@@ -13,15 +13,6 @@ This package exposes every API endpoint documented in the [Debrid-Link v2 introd
 
 The server listens on the port defined in `.env` (`4000` by default).
 
-## Deploying to Vercel
-
-1. Install the Vercel CLI (`npm i -g vercel`) and authenticate with `vercel login`.
-2. Link this project (`vercel link`) and deploy once (`vercel`) so Vercel creates the dashboard entry.
-3. In the Vercel dashboard (or via `vercel env`), add the same environment variables you use locally (`API_BASE_URL`, `OAUTH_BASE_URL`, `API_TIMEOUT_MS`, `API_TOKEN`). Vercel injects them into the serverless function automatically; secrets should never be committed to Git.
-4. Trigger a production deployment with `vercel --prod` (or from the dashboard). All routes rewrite to `api/index.js`, which reuses the Express app defined in `src/app.js`.
-
-`vercel.json` already contains the build/rewrites needed for the serverless deployment, so no further configuration is required.
-
 ## Available routes
 
 All endpoints from the introduction page are available:
