@@ -13,6 +13,18 @@ This package exposes every API endpoint documented in the [Debrid-Link v2 introd
 
 The server listens on the port defined in `.env` (`4000` by default).
 
+## Deploy to Netlify
+
+1. Install dependencies (`npm install`) and add `serverless-http` is already listed in `package.json` for bundling the Express app into a Netlify Function.
+2. Create a Netlify site:
+   - `netlify init` to link the local folder, or use the Netlify UI and point it at your Git repository.
+   - Keep the default build command empty (the API requires no build step) and let Netlify use the provided [`netlify.toml`](netlify.toml).
+3. Configure environment variables in **Site settings → Build & deploy → Environment**. Set the same keys you would place in `.env` (`API_TOKEN`, `API_BASE_URL`, `OAUTH_BASE_URL`, `API_TIMEOUT_MS`, `PORT` is ignored in serverless environments).
+4. Deploy (`git push` to your main branch or run `netlify deploy --prod`). Netlify uploads the API-only `public/` folder as the static artifact while compiling the function located at [`netlify/functions/api.js`](netlify/functions/api.js).
+5. Call your endpoints at `https://<your-site>.netlify.app/api/...`. The redirect in `netlify.toml` rewrites `/api/*` traffic to the function entry point (`/.netlify/functions/api/:splat`).
+
+For local parity you can run `netlify dev`, which proxies `/.netlify/functions/api` to the same Express stack defined in [`src/app.js`](src/app.js). This lets you hit `http://localhost:8888/api/account/infos` without starting the standalone Express server.
+
 ## Available routes
 
 All endpoints from the introduction page are available:
