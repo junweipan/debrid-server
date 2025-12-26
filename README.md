@@ -15,6 +15,8 @@ The server listens on the port defined in `.env` (`4000` by default).
 
 ## Available routes
 
+### Debrid-Link proxy endpoints
+
 All endpoints from the introduction page are available:
 
 - `/account/infos`, `/account/update`
@@ -26,10 +28,23 @@ All endpoints from the introduction page are available:
 
 Use the standard HTTP verb described in the Debrid-Link docs. The server forwards headers, body, and query parameters directly to the upstream API.
 
+### Mongo-backed user CRUD
+
+The server now exposes first-class CRUD helpers backed by MongoDB. Every user document stores `email`, `password`, `storage_all`, `storage_used`, `deleted`, `created_at`, and `updated_at`.
+
+- `POST /users` – create a user. Fails with `409` when the email already exists.
+- `GET /users` – list non-deleted users. Use `GET /users?includeDeleted=true` to include soft-deleted entries.
+- `GET /users/:id` – fetch a single user by identifier.
+- `PUT /users/:id` – update any subset of fields. Validation prevents `storage_used` from exceeding `storage_all`.
+- `DELETE /users/:id` – marks a user as deleted (soft delete) and updates `updated_at`.
+
 ## Configuration notes
 
 - `API_TOKEN` is injected into the `Authorization` header when clients do not send one. Leave it blank to force callers to manage auth themselves.
 - `API_TIMEOUT_MS` controls the upstream request timeout (default `15000`).
+- `MONGODB_URI` points to your MongoDB deployment (defaults to `mongodb://127.0.0.1:27017/debrid`).
+- `MONGODB_DB_NAME` selects the database that stores the user collection (defaults to `debrid`).
+- `MONGODB_USERS_COLLECTION` customizes the collection that stores user documents (defaults to `users`).
 - The proxy currently supports JSON payloads. For file uploads or multipart data you will need to add additional middleware (e.g., `multer`).
 - `TEST_ACCOUNT_INFOS_AUTH` overrides the bearer token used by the built-in tester page (defaults to the sample token in `.env.example`).
 
