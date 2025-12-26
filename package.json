@@ -6,6 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "dev": "nodemon src/server.js",
+    "build": "rimraf dist && esbuild src/server.js --bundle --platform=node --target=node20 --outfile=dist/server.js",
     "start": "node src/server.js",
     "test": "echo \"No tests specified\" && exit 0"
   },
@@ -25,6 +26,8 @@
     "morgan": "^1.10.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.11"
+    "esbuild": "^0.27.2",
+    "nodemon": "^3.1.11",
+    "rimraf": "^6.1.2"
   }
 }
