@@ -7,6 +7,7 @@ const endpointGroups = require("./endpoints");
 const { createProxyHandler } = require("./services/proxyForwarder");
 const { initMongo } = require("./services/mongoClient");
 const usersRouter = require("./routes/users");
+const transactionsRouter = require("./routes/transactions");
 
 const app = express();
 
@@ -28,6 +29,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/users", usersRouter);
+app.use("/transactions", transactionsRouter);
 
 const baseUrlMap = {
   api: config.apiBaseUrl,

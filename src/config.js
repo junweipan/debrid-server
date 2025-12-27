@@ -13,6 +13,8 @@ const mongoDbName =
   process.env.MONGODB_DB_NAME || process.env.MONGO_DB_NAME || "debrid";
 
 const mongoUsersCollection = process.env.MONGODB_USERS_COLLECTION || "users";
+const mongoTransactionsCollection =
+  process.env.MONGODB_TRANSACTIONS_COLLECTION || "transactions";
 
 module.exports = {
   port: parseNumber(process.env.PORT, 4000),
@@ -23,4 +25,5 @@ module.exports = {
   mongoUri,
   mongoDbName,
   mongoUsersCollection,
+  mongoTransactionsCollection,
 };
