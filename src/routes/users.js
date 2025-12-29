@@ -179,6 +179,36 @@ const toUserResponse = (doc) => ({
   updated_at: doc.updated_at,
 });
 
+// Zero out storage fields when the stored quota is already expired.
+const applyStorageExpiration = (doc) => {
+  if (!doc || !doc.storage_expired_at) {
+    return { doc, expired: false };
+  }
+
+  const expiration = new Date(doc.storage_expired_at);
+  if (Number.isNaN(expiration.getTime())) {
+    return { doc, expired: false };
+  }
+
+  const nowInChina = new Date(toChineseIsoString());
+  if (expiration <= nowInChina) {
+    if (doc.storage_all === 0 && doc.storage_used === 0) {
+      return { doc, expired: false };
+    }
+
+    return {
+      doc: {
+        ...doc,
+        storage_all: 0,
+        storage_used: 0,
+      },
+      expired: true,
+    };
+  }
+
+  return { doc, expired: false };
+};
+
 router.get(
   "/",
   asyncHandler(async (req, res) => {
@@ -208,9 +238,24 @@ router.get(
       throw createError(404, "User not found");
     }
 
+    const { doc: userWithStorage, expired } = applyStorageExpiration(user);
+
+    if (expired) {
+      await usersCollection().updateOne(
+        { _id: userId },
+        {
+          $set: {
+            storage_all: 0,
+            storage_used: 0,
+            updated_at: toChineseIsoString(),
+          },
+        }
+      );
+    }
+
     res.json({
       success: true,
-      value: toUserResponse(user),
+      value: toUserResponse(userWithStorage),
     });
   })
 );
