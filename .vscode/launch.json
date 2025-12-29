@@ -7,10 +7,12 @@
         {
         "type": "node",
         "request": "launch",
-        "name": "Run Debrid Server",
-        "program": "${workspaceFolder}/src/server.js",
+        "name": "Debug API (nodemon)",
+        "runtimeExecutable": "nodemon",
+        "runtimeArgs": ["--inspect", "${workspaceFolder}/src/server.js"],
         "envFile": "${workspaceFolder}/.env",
-        "console": "integratedTerminal"
+        "console": "integratedTerminal",
+        "restart": true
         }
     ]
 }

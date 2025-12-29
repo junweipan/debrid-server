@@ -15,6 +15,10 @@ const mongoDbName =
 const mongoUsersCollection = process.env.MONGODB_USERS_COLLECTION || "users";
 const mongoTransactionsCollection =
   process.env.MONGODB_TRANSACTIONS_COLLECTION || "transactions";
+const mongoGiftCardsCollection =
+  process.env.MONGODB_GIFT_CARD_COLLECTION || "gift_card";
+const mongoUserRedeemCollection =
+  process.env.MONGODB_USER_REDEEM_COLLECTION || "user_redeem";
 
 module.exports = {
   port: parseNumber(process.env.PORT, 4000),
@@ -26,4 +30,6 @@ module.exports = {
   mongoDbName,
   mongoUsersCollection,
   mongoTransactionsCollection,
+  mongoGiftCardsCollection,
+  mongoUserRedeemCollection,
 };

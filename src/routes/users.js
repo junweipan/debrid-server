@@ -3,6 +3,7 @@ const createError = require("http-errors");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../services/mongoClient");
 const config = require("../config");
+const { toChineseIsoString } = require("../utils/time");
 
 const router = express.Router();
 const collectionName = config.mongoUsersCollection;
@@ -70,6 +71,20 @@ const parseBooleanField = (value, fallback = false) => {
   return fallback;
 };
 
+const parseNullableDateField = (value, fieldName) => {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw createError(400, `${fieldName} must be a valid date string`);
+  }
+
+  return toChineseIsoString(parsed);
+};
+
 const ensureObjectId = (value) => {
   if (!ObjectId.isValid(value)) {
     throw createError(400, "Invalid user id");
@@ -92,13 +107,16 @@ const createUserDocument = (payload) => {
 
   enforceStorageInvariant(storageAll, storageUsed);
 
-  const timestamp = new Date().toISOString();
+  const timestamp = toChineseIsoString();
 
   return {
     email,
     password,
     storage_all: storageAll,
     storage_used: storageUsed,
+    storage_expired_at: toChineseIsoString(
+      new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    ), // Default to 7 days from now
     deleted: parseBooleanField(payload.deleted, false),
     created_at: timestamp,
     updated_at: timestamp,
@@ -130,6 +148,13 @@ const buildUpdateDocument = (payload, current) => {
 
   enforceStorageInvariant(nextStorageAll, nextStorageUsed);
 
+  if (Object.prototype.hasOwnProperty.call(payload, "storage_expired_at")) {
+    updates.storage_expired_at = parseNullableDateField(
+      payload.storage_expired_at,
+      "storage_expired_at"
+    );
+  }
+
   if (Object.prototype.hasOwnProperty.call(payload, "deleted")) {
     updates.deleted = parseBooleanField(payload.deleted, current.deleted);
   }
@@ -138,7 +163,7 @@ const buildUpdateDocument = (payload, current) => {
     throw createError(400, "No valid fields provided for update");
   }
 
-  updates.updated_at = new Date().toISOString();
+  updates.updated_at = toChineseIsoString();
 
   return updates;
 };
@@ -148,6 +173,7 @@ const toUserResponse = (doc) => ({
   email: doc.email,
   storage_all: doc.storage_all,
   storage_used: doc.storage_used,
+  storage_expired_at: doc.storage_expired_at,
   deleted: doc.deleted,
   created_at: doc.created_at,
   updated_at: doc.updated_at,
@@ -245,7 +271,7 @@ router.delete(
       {
         $set: {
           deleted: true,
-          updated_at: new Date().toISOString(),
+          updated_at: toChineseIsoString(),
         },
       },
       { returnDocument: "after" }
