@@ -20,6 +20,9 @@ const mongoGiftCardsCollection =
 const mongoUserRedeemCollection =
   process.env.MONGODB_USER_REDEEM_COLLECTION || "user_redeem";
 
+const jwtSecret = process.env.JWT_SECRET || "";
+const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "7d";
+
 module.exports = {
   port: parseNumber(process.env.PORT, 4000),
   apiBaseUrl: process.env.API_BASE_URL || "https://debrid-link.com/api/v2",
@@ -32,4 +35,6 @@ module.exports = {
   mongoTransactionsCollection,
   mongoGiftCardsCollection,
   mongoUserRedeemCollection,
+  jwtSecret,
+  jwtExpiresIn,
 };

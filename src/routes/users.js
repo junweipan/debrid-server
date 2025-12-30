@@ -1,5 +1,6 @@
 const express = require("express");
 const createError = require("http-errors");
+const jwt = require("jsonwebtoken");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../services/mongoClient");
 const config = require("../config");
@@ -99,11 +100,99 @@ const enforceStorageInvariant = (storageAll, storageUsed) => {
   }
 };
 
+const requireJwtSecret = () => {
+  if (!config.jwtSecret) {
+    throw createError(500, "JWT secret is not configured");
+  }
+
+  return config.jwtSecret;
+};
+
+const generateAuthToken = (doc) => {
+  const payload = {
+    sub: doc._id.toString(),
+    email: doc.email,
+  };
+
+  const options = {};
+
+  if (config.jwtExpiresIn) {
+    options.expiresIn = config.jwtExpiresIn;
+  }
+
+  return jwt.sign(payload, requireJwtSecret(), options);
+};
+
+const extractBearerToken = (authorizationHeader) => {
+  if (typeof authorizationHeader !== "string") {
+    throw createError(401, "Authorization token is required");
+  }
+
+  const [scheme, token] = authorizationHeader.trim().split(/\s+/);
+
+  if (scheme?.toLowerCase() !== "bearer" || !token) {
+    throw createError(401, "Authorization token is required");
+  }
+
+  return token;
+};
+
+const authenticateRequest = asyncHandler(async (req, _res, next) => {
+  let payload;
+
+  try {
+    const token = extractBearerToken(req.headers.authorization);
+    payload = jwt.verify(token, requireJwtSecret());
+  } catch (error) {
+    throw createError(401, "Invalid token");
+  }
+
+  if (!payload?.sub || !ObjectId.isValid(payload.sub)) {
+    throw createError(401, "Invalid token");
+  }
+
+  const user = await usersCollection().findOne({
+    _id: new ObjectId(payload.sub),
+    deleted: false,
+  });
+
+  if (!user) {
+    throw createError(401, "Invalid token");
+  }
+
+  req.authUser = user;
+  next();
+});
+
+const isAdmin = (user) => (user?.role || "standard") === "admin";
+
+const ensureAdmin = (currentUser) => {
+  if (!isAdmin(currentUser)) {
+    throw createError(403, "Forbidden");
+  }
+};
+
+const ensureSelfAccess = (requestedUserId, currentUser) => {
+  if (!currentUser?._id) {
+    throw createError(401, "Invalid token");
+  }
+
+  if (isAdmin(currentUser)) {
+    return;
+  }
+
+  if (!currentUser._id.equals(requestedUserId)) {
+    throw createError(403, "Forbidden");
+  }
+};
+
 const createUserDocument = (payload) => {
   const email = normalizeEmail(payload.email);
   const password = parsePassword(payload.password);
   const storageAll = parseNumberField(payload.storage_all, "storage_all");
   const storageUsed = parseNumberField(payload.storage_used, "storage_used");
+  const role =
+    typeof payload.role === "string" ? payload.role.trim() : "standard";
 
   enforceStorageInvariant(storageAll, storageUsed);
 
@@ -118,6 +207,7 @@ const createUserDocument = (payload) => {
       new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
     ), // Default to 7 days from now
     deleted: parseBooleanField(payload.deleted, false),
+    role: role === "" ? "standard" : role,
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -127,6 +217,7 @@ const buildUpdateDocument = (payload, current) => {
   const updates = {};
   let nextStorageAll = current.storage_all;
   let nextStorageUsed = current.storage_used;
+  let nextRole = current.role || "standard";
 
   if (Object.prototype.hasOwnProperty.call(payload, "email")) {
     updates.email = normalizeEmail(payload.email);
@@ -159,6 +250,15 @@ const buildUpdateDocument = (payload, current) => {
     updates.deleted = parseBooleanField(payload.deleted, current.deleted);
   }
 
+  if (Object.prototype.hasOwnProperty.call(payload, "role")) {
+    if (typeof payload.role !== "string" || payload.role.trim().length === 0) {
+      throw createError(400, "role must be a non-empty string");
+    }
+
+    nextRole = payload.role.trim();
+    updates.role = nextRole;
+  }
+
   if (Object.keys(updates).length === 0) {
     throw createError(400, "No valid fields provided for update");
   }
@@ -168,6 +268,33 @@ const buildUpdateDocument = (payload, current) => {
   return updates;
 };
 
+const insertUser = async (payload = {}) => {
+  const doc = createUserDocument(payload);
+
+  const existing = await usersCollection().findOne({ email: doc.email });
+
+  if (existing) {
+    throw createError(409, "A user with this email already exists");
+  }
+
+  const { insertedId } = await usersCollection().insertOne(doc);
+
+  return { ...doc, _id: insertedId };
+};
+
+const authenticateUser = async (payload = {}) => {
+  const email = normalizeEmail(payload.email);
+  const password = parsePassword(payload.password);
+
+  const user = await usersCollection().findOne({ email });
+
+  if (!user || user.deleted || user.password !== password) {
+    throw createError(401, "Invalid email or password");
+  }
+
+  return user;
+};
+
 const toUserResponse = (doc) => ({
   id: doc._id.toString(),
   email: doc.email,
@@ -175,6 +302,7 @@ const toUserResponse = (doc) => ({
   storage_used: doc.storage_used,
   storage_expired_at: doc.storage_expired_at,
   deleted: doc.deleted,
+  role: doc.role || "standard",
   created_at: doc.created_at,
   updated_at: doc.updated_at,
 });
@@ -209,28 +337,78 @@ const applyStorageExpiration = (doc) => {
   return { doc, expired: false };
 };
 
+const refreshStorageIfExpired = async (doc) => {
+  if (!doc) {
+    return doc;
+  }
+
+  const { doc: maybeUpdatedDoc, expired } = applyStorageExpiration(doc);
+
+  if (!expired) {
+    return maybeUpdatedDoc;
+  }
+
+  const timestamp = toChineseIsoString();
+
+  await usersCollection().updateOne(
+    { _id: doc._id },
+    {
+      $set: {
+        storage_all: maybeUpdatedDoc.storage_all,
+        storage_used: maybeUpdatedDoc.storage_used,
+        updated_at: timestamp,
+      },
+    }
+  );
+
+  return {
+    ...maybeUpdatedDoc,
+    updated_at: timestamp,
+  };
+};
+
 router.get(
   "/",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
-    const includeDeleted = parseBooleanField(req.query.includeDeleted, false);
-    const filter = includeDeleted ? {} : { deleted: false };
+    if (isAdmin(req.authUser)) {
+      const includeDeleted = parseBooleanField(req.query.includeDeleted, false);
+      const filter = includeDeleted ? {} : { deleted: false };
 
-    const users = await usersCollection()
-      .find(filter)
-      .sort({ created_at: -1 })
-      .toArray();
+      const users = await usersCollection()
+        .find(filter)
+        .sort({ created_at: -1 })
+        .toArray();
+
+      res.json({
+        success: true,
+        value: users.map(toUserResponse),
+      });
+      return;
+    }
+
+    const current = await usersCollection().findOne({ _id: req.authUser._id });
+
+    if (!current) {
+      throw createError(404, "User not found");
+    }
+
+    const userWithStorage = await refreshStorageIfExpired(current);
 
     res.json({
       success: true,
-      value: users.map(toUserResponse),
+      value: [toUserResponse(userWithStorage)],
     });
   })
 );
 
 router.get(
   "/:id",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
     const userId = ensureObjectId(req.params.id);
+
+    ensureSelfAccess(userId, req.authUser);
 
     const user = await usersCollection().findOne({ _id: userId });
 
@@ -238,20 +416,7 @@ router.get(
       throw createError(404, "User not found");
     }
 
-    const { doc: userWithStorage, expired } = applyStorageExpiration(user);
-
-    if (expired) {
-      await usersCollection().updateOne(
-        { _id: userId },
-        {
-          $set: {
-            storage_all: 0,
-            storage_used: 0,
-            updated_at: toChineseIsoString(),
-          },
-        }
-      );
-    }
+    const userWithStorage = await refreshStorageIfExpired(user);
 
     res.json({
       success: true,
@@ -262,28 +427,56 @@ router.get(
 
 router.post(
   "/",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
-    const doc = createUserDocument(req.body || {});
-
-    const existing = await usersCollection().findOne({ email: doc.email });
-
-    if (existing) {
-      throw createError(409, "A user with this email already exists");
-    }
-
-    const { insertedId } = await usersCollection().insertOne(doc);
+    const createdUser = await insertUser(req.body || {});
 
     res.status(201).json({
       success: true,
-      value: toUserResponse({ ...doc, _id: insertedId }),
+      value: toUserResponse(createdUser),
+    });
+  })
+);
+
+router.post(
+  "/register",
+  asyncHandler(async (req, res) => {
+    const createdUser = await insertUser(req.body || {});
+    const token = generateAuthToken(createdUser);
+
+    res.status(201).json({
+      success: true,
+      value: {
+        user: toUserResponse(createdUser),
+        token,
+      },
+    });
+  })
+);
+
+router.post(
+  "/login",
+  asyncHandler(async (req, res) => {
+    const authenticatedUser = await authenticateUser(req.body || {});
+    const userWithStorage = await refreshStorageIfExpired(authenticatedUser);
+    const token = generateAuthToken(userWithStorage);
+
+    res.json({
+      success: true,
+      value: {
+        user: toUserResponse(userWithStorage),
+        token,
+      },
     });
   })
 );
 
 router.put(
   "/:id",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
     const userId = ensureObjectId(req.params.id);
+    ensureSelfAccess(userId, req.authUser);
     const current = await usersCollection().findOne({ _id: userId });
 
     if (!current) {
@@ -308,8 +501,10 @@ router.put(
 
 router.delete(
   "/:id",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
     const userId = ensureObjectId(req.params.id);
+    ensureSelfAccess(userId, req.authUser);
 
     const result = await usersCollection().findOneAndUpdate(
       { _id: userId },
