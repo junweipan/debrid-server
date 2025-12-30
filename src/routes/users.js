@@ -123,6 +123,36 @@ const generateAuthToken = (doc) => {
   return jwt.sign(payload, requireJwtSecret(), options);
 };
 
+const persistUserToken = async (userId, token) => {
+  if (typeof token !== "string" || token.length === 0) {
+    throw createError(500, "Failed to generate token");
+  }
+
+  const normalizedId =
+    userId instanceof ObjectId ? userId : ensureObjectId(userId);
+
+  const result = await usersCollection().updateOne(
+    { _id: normalizedId },
+    { $set: { token } }
+  );
+
+  if (result.matchedCount === 0) {
+    throw createError(404, "User not found");
+  }
+
+  return token;
+};
+
+const issueAuthTokenForUser = async (doc) => {
+  if (!doc?._id) {
+    throw createError(500, "Unable to issue token for user");
+  }
+
+  const token = generateAuthToken(doc);
+  await persistUserToken(doc._id, token);
+  return token;
+};
+
 const extractBearerToken = (authorizationHeader) => {
   if (typeof authorizationHeader !== "string") {
     throw createError(401, "Authorization token is required");
@@ -210,6 +240,7 @@ const createUserDocument = (payload) => {
     role: role === "" ? "standard" : role,
     created_at: timestamp,
     updated_at: timestamp,
+    token: null,
   };
 };
 
@@ -442,7 +473,7 @@ router.post(
   "/register",
   asyncHandler(async (req, res) => {
     const createdUser = await insertUser(req.body || {});
-    const token = generateAuthToken(createdUser);
+    const token = await issueAuthTokenForUser(createdUser);
 
     res.status(201).json({
       success: true,
@@ -459,7 +490,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const authenticatedUser = await authenticateUser(req.body || {});
     const userWithStorage = await refreshStorageIfExpired(authenticatedUser);
-    const token = generateAuthToken(userWithStorage);
+    const token = await issueAuthTokenForUser(userWithStorage);
 
     res.json({
       success: true,
