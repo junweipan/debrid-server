@@ -153,6 +153,24 @@ const issueAuthTokenForUser = async (doc) => {
   return token;
 };
 
+const recordLastLoginTimestamp = async (doc) => {
+  if (!doc?._id) {
+    throw createError(500, "Unable to update last login timestamp");
+  }
+
+  const timestamp = toChineseIsoString();
+
+  await usersCollection().updateOne(
+    { _id: doc._id },
+    { $set: { last_login_at: timestamp } }
+  );
+
+  return {
+    ...doc,
+    last_login_at: timestamp,
+  };
+};
+
 const extractBearerToken = (authorizationHeader) => {
   if (typeof authorizationHeader !== "string") {
     throw createError(401, "Authorization token is required");
@@ -241,6 +259,7 @@ const createUserDocument = (payload) => {
     created_at: timestamp,
     updated_at: timestamp,
     token: null,
+    last_login_at: null,
   };
 };
 
@@ -336,6 +355,7 @@ const toUserResponse = (doc) => ({
   role: doc.role || "standard",
   created_at: doc.created_at,
   updated_at: doc.updated_at,
+  last_login_at: doc.last_login_at,
 });
 
 // Zero out storage fields when the stored quota is already expired.
@@ -473,12 +493,13 @@ router.post(
   "/register",
   asyncHandler(async (req, res) => {
     const createdUser = await insertUser(req.body || {});
-    const token = await issueAuthTokenForUser(createdUser);
+    const userWithLastLogin = await recordLastLoginTimestamp(createdUser);
+    const token = await issueAuthTokenForUser(userWithLastLogin);
 
     res.status(201).json({
       success: true,
       value: {
-        user: toUserResponse(createdUser),
+        user: toUserResponse(userWithLastLogin),
         token,
       },
     });
@@ -490,12 +511,13 @@ router.post(
   asyncHandler(async (req, res) => {
     const authenticatedUser = await authenticateUser(req.body || {});
     const userWithStorage = await refreshStorageIfExpired(authenticatedUser);
-    const token = await issueAuthTokenForUser(userWithStorage);
+    const userWithLastLogin = await recordLastLoginTimestamp(userWithStorage);
+    const token = await issueAuthTokenForUser(userWithLastLogin);
 
     res.json({
       success: true,
       value: {
-        user: toUserResponse(userWithStorage),
+        user: toUserResponse(userWithLastLogin),
         token,
       },
     });
