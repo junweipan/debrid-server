@@ -22,6 +22,10 @@ const mongoUserRedeemCollection =
 
 const jwtSecret = process.env.JWT_SECRET || "";
 const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "7d";
+const mailerSendAccessToken = process.env.MAILERSEND_ACCESS_TOKEN;
+const mailerSendFromEmail = process.env.MAILERSEND_FROM_EMAIL;
+const mailerSendFromName = process.env.MAILERSEND_FROM_NAME;
+const passwordResetUrl = process.env.PASSWORD_RESET_URL || "";
 
 module.exports = {
   port: parseNumber(process.env.PORT, 4000),
@@ -37,4 +41,8 @@ module.exports = {
   mongoUserRedeemCollection,
   jwtSecret,
   jwtExpiresIn,
+  mailerSendAccessToken,
+  mailerSendFromEmail,
+  mailerSendFromName,
+  passwordResetUrl,
 };

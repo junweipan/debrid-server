@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const express = require("express");
 const createError = require("http-errors");
 const jwt = require("jsonwebtoken");
@@ -5,9 +6,12 @@ const { ObjectId } = require("mongodb");
 const { getDb } = require("../services/mongoClient");
 const config = require("../config");
 const { toChineseIsoString } = require("../utils/time");
+const { sendPasswordResetEmail } = require("../services/mailerSend");
 
 const router = express.Router();
 const collectionName = config.mongoUsersCollection;
+const PASSWORD_RESET_TOKEN_BYTES = 32;
+const PASSWORD_RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
 
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
@@ -34,6 +38,14 @@ const parsePassword = (value) => {
   }
 
   return value;
+};
+
+const parseResetToken = (value) => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw createError(400, "Reset token is required");
+  }
+
+  return value.trim();
 };
 
 const parseNumberField = (value, fieldName) => {
@@ -171,6 +183,43 @@ const recordLastLoginTimestamp = async (doc) => {
   };
 };
 
+const generatePasswordResetToken = () =>
+  crypto.randomBytes(PASSWORD_RESET_TOKEN_BYTES).toString("hex");
+
+const persistPasswordResetToken = async (userId) => {
+  const token = generatePasswordResetToken();
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TOKEN_TTL_MS);
+  const timestamp = toChineseIsoString();
+
+  await usersCollection().updateOne(
+    { _id: userId },
+    {
+      $set: {
+        password_reset_token: token,
+        password_reset_token_expires_at: toChineseIsoString(expiresAt),
+        updated_at: timestamp,
+      },
+    }
+  );
+
+  return token;
+};
+
+const clearPasswordResetToken = async (userId) => {
+  const timestamp = toChineseIsoString();
+
+  await usersCollection().updateOne(
+    { _id: userId },
+    {
+      $set: { updated_at: timestamp },
+      $unset: {
+        password_reset_token: "",
+        password_reset_token_expires_at: "",
+      },
+    }
+  );
+};
+
 const extractBearerToken = (authorizationHeader) => {
   if (typeof authorizationHeader !== "string") {
     throw createError(401, "Authorization token is required");
@@ -260,6 +309,8 @@ const createUserDocument = (payload) => {
     updated_at: timestamp,
     token: null,
     last_login_at: null,
+    password_reset_token: null,
+    password_reset_token_expires_at: null,
   };
 };
 
@@ -485,6 +536,87 @@ router.post(
     res.status(201).json({
       success: true,
       value: toUserResponse(createdUser),
+    });
+  })
+);
+
+router.post(
+  "/reset-password/request",
+  asyncHandler(async (req, res) => {
+    const email = normalizeEmail(req.body?.email);
+    const user = await usersCollection().findOne({ email, deleted: false });
+
+    if (user) {
+      const token = await persistPasswordResetToken(user._id);
+      await sendPasswordResetEmail({
+        toEmail: user.email,
+        toName: user.email,
+        token,
+      });
+    }
+
+    res.json({
+      success: true,
+      value: {
+        message:
+          "If an account exists for the provided email, password reset instructions have been sent.",
+      },
+    });
+  })
+);
+
+router.post(
+  "/reset-password/confirm",
+  asyncHandler(async (req, res) => {
+    const token = parseResetToken(req.body?.token);
+    const newPassword = parsePassword(req.body?.password);
+
+    const user = await usersCollection().findOne({
+      password_reset_token: token,
+      deleted: false,
+    });
+
+    if (!user) {
+      throw createError(400, "Invalid or expired reset token");
+    }
+
+    const expiration = user.password_reset_token_expires_at
+      ? new Date(user.password_reset_token_expires_at)
+      : null;
+
+    if (!expiration || Number.isNaN(expiration.getTime())) {
+      await clearPasswordResetToken(user._id);
+      throw createError(400, "Invalid or expired reset token");
+    }
+
+    const now = new Date(toChineseIsoString());
+
+    if (expiration <= now) {
+      await clearPasswordResetToken(user._id);
+      throw createError(400, "Reset token has expired");
+    }
+
+    const timestamp = toChineseIsoString();
+
+    await usersCollection().updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          password: newPassword,
+          updated_at: timestamp,
+        },
+        $unset: {
+          password_reset_token: "",
+          password_reset_token_expires_at: "",
+        },
+      }
+    );
+
+    res.json({
+      success: true,
+      value: {
+        message: "Password updated successfully",
+      },
     });
   })
 );
