@@ -4,10 +4,12 @@ const morgan = require("morgan");
 const createError = require("http-errors");
 const config = require("./config");
 const endpointGroups = require("./endpoints");
+const { toChineseIsoString } = require("./utils/time");
 const { createProxyHandler } = require("./services/proxyForwarder");
 const { initMongo } = require("./services/mongoClient");
 const usersRouter = require("./routes/users");
 const transactionsRouter = require("./routes/transactions");
+const giftCardsRouter = require("./routes/giftCards");
 
 const app = express();
 
@@ -23,13 +25,14 @@ app.get("/health", (req, res) => {
     value: {
       status: "ok",
       uptime: process.uptime(),
-      timestamp: new Date().toISOString(),
+      timestamp: toChineseIsoString(),
     },
   });
 });
 
 app.use("/users", usersRouter);
 app.use("/transactions", transactionsRouter);
+app.use("/gift-cards", giftCardsRouter);
 
 const baseUrlMap = {
   api: config.apiBaseUrl,

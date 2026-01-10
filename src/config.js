@@ -15,6 +15,20 @@ const mongoDbName =
 const mongoUsersCollection = process.env.MONGODB_USERS_COLLECTION || "users";
 const mongoTransactionsCollection =
   process.env.MONGODB_TRANSACTIONS_COLLECTION || "transactions";
+const mongoGiftCardsCollection =
+  process.env.MONGODB_GIFT_CARD_COLLECTION || "gift_card";
+const mongoUserRedeemCollection =
+  process.env.MONGODB_USER_REDEEM_COLLECTION || "user_redeem";
+const mongoVerifyEmailCollection =
+  process.env.MONGODB_VERIFY_EMAIL_COLLECTION || "verify_email";
+
+const jwtSecret = process.env.JWT_SECRET || "";
+const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "7d";
+const mailerSendAccessToken = process.env.MAILERSEND_ACCESS_TOKEN;
+const mailerSendFromEmail = process.env.MAILERSEND_FROM_EMAIL;
+const mailerSendFromName = process.env.MAILERSEND_FROM_NAME;
+const passwordResetUrl = process.env.PASSWORD_RESET_URL || "";
+const emailVerificationUrl = process.env.EMAIL_VERIFICATION_URL || "";
 
 module.exports = {
   port: parseNumber(process.env.PORT, 4000),
@@ -26,4 +40,14 @@ module.exports = {
   mongoDbName,
   mongoUsersCollection,
   mongoTransactionsCollection,
+  mongoGiftCardsCollection,
+  mongoUserRedeemCollection,
+  mongoVerifyEmailCollection,
+  jwtSecret,
+  jwtExpiresIn,
+  mailerSendAccessToken,
+  mailerSendFromEmail,
+  mailerSendFromName,
+  passwordResetUrl,
+  emailVerificationUrl,
 };

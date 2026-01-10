@@ -3,6 +3,7 @@ const createError = require("http-errors");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../services/mongoClient");
 const config = require("../config");
+const { toChineseIsoString } = require("../utils/time");
 
 const router = express.Router();
 const collectionName = config.mongoTransactionsCollection;
@@ -99,7 +100,7 @@ const parseOrderDate = (value) => {
     throw createError(400, "order_date must be a valid date");
   }
 
-  return parsed.toISOString();
+  return toChineseIsoString(parsed);
 };
 
 const parseMetadata = (value) => {
@@ -169,7 +170,7 @@ const createTransactionDocument = (payload = {}) => {
   const orderDesc = parseNonEmptyString(payload.order_desc, "order_desc", {
     maxLength: 1000,
   });
-  const timestamp = new Date().toISOString();
+  const timestamp = toChineseIsoString();
 
   return {
     user_id: userId,
@@ -262,7 +263,7 @@ const buildUpdateDocument = (payload = {}) => {
     throw createError(400, "No valid fields provided for update");
   }
 
-  updates.updated_at = new Date().toISOString();
+  updates.updated_at = toChineseIsoString();
 
   return updates;
 };
@@ -405,7 +406,7 @@ router.delete(
       {
         $set: {
           deleted: true,
-          updated_at: new Date().toISOString(),
+          updated_at: toChineseIsoString(),
         },
       },
       { returnDocument: "after" }

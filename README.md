@@ -38,6 +38,12 @@ The server now exposes first-class CRUD helpers backed by MongoDB. Every user do
 - `PUT /users/:id` – update any subset of fields. Validation prevents `storage_used` from exceeding `storage_all`.
 - `DELETE /users/:id` – marks a user as deleted (soft delete) and updates `updated_at`.
 
+### Email verification flow
+
+- `POST /users/register/request-verification` – accepts an `email`, ensures it is unused, stores a short-lived token in the `verify_email` collection, and dispatches a MailerSend verification email. Responds with `202 Accepted`.
+- `POST /users/register` – creates an account only when the request includes a valid `verification_token` (from the email above) along with the usual registration payload. Tokens expire after 24 hours and are single-use.
+- Expired verification requests are cleaned up automatically via a TTL index on `verify_email.expires_at_ts`, so MongoDB removes stale documents without manual cron jobs.
+
 ## Configuration notes
 
 - `API_TOKEN` is injected into the `Authorization` header when clients do not send one. Leave it blank to force callers to manage auth themselves.
@@ -45,6 +51,8 @@ The server now exposes first-class CRUD helpers backed by MongoDB. Every user do
 - `MONGODB_URI` points to your MongoDB deployment (defaults to `mongodb://127.0.0.1:27017/debrid`).
 - `MONGODB_DB_NAME` selects the database that stores the user collection (defaults to `debrid`).
 - `MONGODB_USERS_COLLECTION` customizes the collection that stores user documents (defaults to `users`).
+- `MONGODB_VERIFY_EMAIL_COLLECTION` customizes the collection that stores pending email verification tokens (defaults to `verify_email`).
+- `EMAIL_VERIFICATION_URL` builds the verification link in outgoing emails. Include `%token%` to control token placement, or omit it to have the API append `?token=...` automatically.
 - The proxy currently supports JSON payloads. For file uploads or multipart data you will need to add additional middleware (e.g., `multer`).
 - `TEST_ACCOUNT_INFOS_AUTH` overrides the bearer token used by the built-in tester page (defaults to the sample token in `.env.example`).
 

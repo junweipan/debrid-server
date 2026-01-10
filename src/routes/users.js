@@ -1,16 +1,29 @@
+const crypto = require("crypto");
 const express = require("express");
 const createError = require("http-errors");
+const jwt = require("jsonwebtoken");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../services/mongoClient");
 const config = require("../config");
+const { toChineseIsoString } = require("../utils/time");
+const {
+  sendPasswordResetEmail,
+  sendEmailVerificationEmail,
+} = require("../services/mailerSend");
 
 const router = express.Router();
 const collectionName = config.mongoUsersCollection;
+const PASSWORD_RESET_TOKEN_BYTES = 32;
+const PASSWORD_RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
+const EMAIL_VERIFICATION_TOKEN_BYTES = 32;
+const EMAIL_VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
 const usersCollection = () => getDb().collection(collectionName);
+const verifyEmailCollection = () =>
+  getDb().collection(config.mongoVerifyEmailCollection);
 
 const normalizeEmail = (value) => {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -32,6 +45,22 @@ const parsePassword = (value) => {
   }
 
   return value;
+};
+
+const parseResetToken = (value) => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw createError(400, "Reset token is required");
+  }
+
+  return value.trim();
+};
+
+const parseVerificationToken = (value) => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw createError(400, "Verification token is required");
+  }
+
+  return value.trim();
 };
 
 const parseNumberField = (value, fieldName) => {
@@ -70,6 +99,20 @@ const parseBooleanField = (value, fallback = false) => {
   return fallback;
 };
 
+const parseNullableDateField = (value, fieldName) => {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw createError(400, `${fieldName} must be a valid date string`);
+  }
+
+  return toChineseIsoString(parsed);
+};
+
 const ensureObjectId = (value) => {
   if (!ObjectId.isValid(value)) {
     throw createError(400, "Invalid user id");
@@ -84,24 +127,270 @@ const enforceStorageInvariant = (storageAll, storageUsed) => {
   }
 };
 
+const requireJwtSecret = () => {
+  if (!config.jwtSecret) {
+    throw createError(500, "JWT secret is not configured");
+  }
+
+  return config.jwtSecret;
+};
+
+const generateAuthToken = (doc) => {
+  const payload = {
+    sub: doc._id.toString(),
+    email: doc.email,
+  };
+
+  const options = {};
+
+  if (config.jwtExpiresIn) {
+    options.expiresIn = config.jwtExpiresIn;
+  }
+
+  return jwt.sign(payload, requireJwtSecret(), options);
+};
+
+const persistUserToken = async (userId, token) => {
+  if (typeof token !== "string" || token.length === 0) {
+    throw createError(500, "Failed to generate token");
+  }
+
+  const normalizedId =
+    userId instanceof ObjectId ? userId : ensureObjectId(userId);
+
+  const result = await usersCollection().updateOne(
+    { _id: normalizedId },
+    { $set: { token } }
+  );
+
+  if (result.matchedCount === 0) {
+    throw createError(404, "User not found");
+  }
+
+  return token;
+};
+
+const issueAuthTokenForUser = async (doc) => {
+  if (!doc?._id) {
+    throw createError(500, "Unable to issue token for user");
+  }
+
+  const token = generateAuthToken(doc);
+  await persistUserToken(doc._id, token);
+  return token;
+};
+
+const recordLastLoginTimestamp = async (doc) => {
+  if (!doc?._id) {
+    throw createError(500, "Unable to update last login timestamp");
+  }
+
+  const timestamp = toChineseIsoString();
+
+  await usersCollection().updateOne(
+    { _id: doc._id },
+    { $set: { last_login_at: timestamp } }
+  );
+
+  return {
+    ...doc,
+    last_login_at: timestamp,
+  };
+};
+
+const generatePasswordResetToken = () =>
+  crypto.randomBytes(PASSWORD_RESET_TOKEN_BYTES).toString("hex");
+
+const persistPasswordResetToken = async (userId) => {
+  const token = generatePasswordResetToken();
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TOKEN_TTL_MS);
+  const timestamp = toChineseIsoString();
+
+  await usersCollection().updateOne(
+    { _id: userId },
+    {
+      $set: {
+        password_reset_token: token,
+        password_reset_token_expires_at: toChineseIsoString(expiresAt),
+        updated_at: timestamp,
+      },
+    }
+  );
+
+  return token;
+};
+
+const clearPasswordResetToken = async (userId) => {
+  const timestamp = toChineseIsoString();
+
+  await usersCollection().updateOne(
+    { _id: userId },
+    {
+      $set: { updated_at: timestamp },
+      $unset: {
+        password_reset_token: "",
+        password_reset_token_expires_at: "",
+      },
+    }
+  );
+};
+
+const generateEmailVerificationToken = () =>
+  crypto.randomBytes(EMAIL_VERIFICATION_TOKEN_BYTES).toString("hex");
+
+const persistEmailVerificationRequest = async (email, password) => {
+  const token = generateEmailVerificationToken();
+  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS);
+  const timestamp = toChineseIsoString();
+
+  await verifyEmailCollection().deleteMany({ email });
+
+  await verifyEmailCollection().insertOne({
+    email,
+    password,
+    token,
+    expires_at_ts: toChineseIsoString(expiresAt),
+    created_at: timestamp,
+    updated_at: timestamp,
+    consumed_at: null,
+  });
+
+  return token;
+};
+
+const consumeEmailVerificationToken = async (token, email) => {
+  const record = await verifyEmailCollection().findOne({
+    token,
+    email,
+    consumed_at: null,
+  });
+
+  if (!record) {
+    throw createError(400, "Invalid or expired verification token");
+  }
+
+  const expiration =
+    record.expires_at_ts instanceof Date
+      ? record.expires_at_ts
+      : null;
+  const now = new Date(toChineseIsoString());
+
+  if (!expiration || Number.isNaN(expiration.getTime()) || expiration <= now) {
+    await verifyEmailCollection().deleteOne({ _id: record._id });
+    throw createError(400, "Invalid or expired verification token");
+  }
+
+  const timestamp = toChineseIsoString();
+
+  const result = await verifyEmailCollection().findOneAndUpdate(
+    { _id: record._id, consumed_at: null },
+    {
+      $set: {
+        consumed_at: timestamp,
+        updated_at: timestamp,
+      },
+    },
+    { returnDocument: "after" }
+  );
+
+  if (!result.value) {
+    throw createError(400, "Invalid or expired verification token");
+  }
+
+  return result.value;
+};
+
+const extractBearerToken = (authorizationHeader) => {
+  if (typeof authorizationHeader !== "string") {
+    throw createError(401, "Authorization token is required");
+  }
+
+  const [scheme, token] = authorizationHeader.trim().split(/\s+/);
+
+  if (scheme?.toLowerCase() !== "bearer" || !token) {
+    throw createError(401, "Authorization token is required");
+  }
+
+  return token;
+};
+
+const authenticateRequest = asyncHandler(async (req, _res, next) => {
+  let payload;
+
+  try {
+    const token = extractBearerToken(req.headers.authorization);
+    payload = jwt.verify(token, requireJwtSecret());
+  } catch (error) {
+    throw createError(401, "Invalid token");
+  }
+
+  if (!payload?.sub || !ObjectId.isValid(payload.sub)) {
+    throw createError(401, "Invalid token");
+  }
+
+  const user = await usersCollection().findOne({
+    _id: new ObjectId(payload.sub),
+    deleted: false,
+  });
+
+  if (!user) {
+    throw createError(401, "Invalid token");
+  }
+
+  req.authUser = user;
+  next();
+});
+
+const isAdmin = (user) => (user?.role || "standard") === "admin";
+
+const ensureAdmin = (currentUser) => {
+  if (!isAdmin(currentUser)) {
+    throw createError(403, "Forbidden");
+  }
+};
+
+const ensureSelfAccess = (requestedUserId, currentUser) => {
+  if (!currentUser?._id) {
+    throw createError(401, "Invalid token");
+  }
+
+  if (isAdmin(currentUser)) {
+    return;
+  }
+
+  if (!currentUser._id.equals(requestedUserId)) {
+    throw createError(403, "Forbidden");
+  }
+};
+
 const createUserDocument = (payload) => {
   const email = normalizeEmail(payload.email);
   const password = parsePassword(payload.password);
   const storageAll = parseNumberField(payload.storage_all, "storage_all");
   const storageUsed = parseNumberField(payload.storage_used, "storage_used");
+  const role =
+    typeof payload.role === "string" ? payload.role.trim() : "standard";
 
   enforceStorageInvariant(storageAll, storageUsed);
 
-  const timestamp = new Date().toISOString();
+  const timestamp = toChineseIsoString();
 
   return {
     email,
     password,
     storage_all: storageAll,
     storage_used: storageUsed,
+    storage_expired_at: toChineseIsoString(
+      new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    ), // Default to 7 days from now
     deleted: parseBooleanField(payload.deleted, false),
+    role: role === "" ? "standard" : role,
     created_at: timestamp,
     updated_at: timestamp,
+    token: null,
+    last_login_at: null,
+    password_reset_token: null,
+    password_reset_token_expires_at: null,
   };
 };
 
@@ -109,6 +398,7 @@ const buildUpdateDocument = (payload, current) => {
   const updates = {};
   let nextStorageAll = current.storage_all;
   let nextStorageUsed = current.storage_used;
+  let nextRole = current.role || "standard";
 
   if (Object.prototype.hasOwnProperty.call(payload, "email")) {
     updates.email = normalizeEmail(payload.email);
@@ -130,17 +420,60 @@ const buildUpdateDocument = (payload, current) => {
 
   enforceStorageInvariant(nextStorageAll, nextStorageUsed);
 
+  if (Object.prototype.hasOwnProperty.call(payload, "storage_expired_at")) {
+    updates.storage_expired_at = parseNullableDateField(
+      payload.storage_expired_at,
+      "storage_expired_at"
+    );
+  }
+
   if (Object.prototype.hasOwnProperty.call(payload, "deleted")) {
     updates.deleted = parseBooleanField(payload.deleted, current.deleted);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "role")) {
+    if (typeof payload.role !== "string" || payload.role.trim().length === 0) {
+      throw createError(400, "role must be a non-empty string");
+    }
+
+    nextRole = payload.role.trim();
+    updates.role = nextRole;
   }
 
   if (Object.keys(updates).length === 0) {
     throw createError(400, "No valid fields provided for update");
   }
 
-  updates.updated_at = new Date().toISOString();
+  updates.updated_at = toChineseIsoString();
 
   return updates;
+};
+
+const insertUser = async (payload = {}) => {
+  const doc = createUserDocument(payload);
+
+  const existing = await usersCollection().findOne({ email: doc.email });
+
+  if (existing) {
+    throw createError(409, "A user with this email already exists");
+  }
+
+  const { insertedId } = await usersCollection().insertOne(doc);
+
+  return { ...doc, _id: insertedId };
+};
+
+const authenticateUser = async (payload = {}) => {
+  const email = normalizeEmail(payload.email);
+  const password = parsePassword(payload.password);
+
+  const user = await usersCollection().findOne({ email });
+
+  if (!user || user.deleted || user.password !== password) {
+    throw createError(401, "Invalid email or password");
+  }
+
+  return user;
 };
 
 const toUserResponse = (doc) => ({
@@ -148,33 +481,116 @@ const toUserResponse = (doc) => ({
   email: doc.email,
   storage_all: doc.storage_all,
   storage_used: doc.storage_used,
+  storage_expired_at: doc.storage_expired_at,
   deleted: doc.deleted,
+  role: doc.role || "standard",
   created_at: doc.created_at,
   updated_at: doc.updated_at,
+  last_login_at: doc.last_login_at,
 });
+
+// Zero out storage fields when the stored quota is already expired.
+const applyStorageExpiration = (doc) => {
+  if (!doc || !doc.storage_expired_at) {
+    return { doc, expired: false };
+  }
+
+  const expiration = new Date(doc.storage_expired_at);
+  if (Number.isNaN(expiration.getTime())) {
+    return { doc, expired: false };
+  }
+
+  const nowInChina = new Date(toChineseIsoString());
+  if (expiration <= nowInChina) {
+    if (doc.storage_all === 0 && doc.storage_used === 0) {
+      return { doc, expired: false };
+    }
+
+    return {
+      doc: {
+        ...doc,
+        storage_all: 0,
+        storage_used: 0,
+      },
+      expired: true,
+    };
+  }
+
+  return { doc, expired: false };
+};
+
+const refreshStorageIfExpired = async (doc) => {
+  if (!doc) {
+    return doc;
+  }
+
+  const { doc: maybeUpdatedDoc, expired } = applyStorageExpiration(doc);
+
+  if (!expired) {
+    return maybeUpdatedDoc;
+  }
+
+  const timestamp = toChineseIsoString();
+
+  await usersCollection().updateOne(
+    { _id: doc._id },
+    {
+      $set: {
+        storage_all: maybeUpdatedDoc.storage_all,
+        storage_used: maybeUpdatedDoc.storage_used,
+        updated_at: timestamp,
+      },
+    }
+  );
+
+  return {
+    ...maybeUpdatedDoc,
+    updated_at: timestamp,
+  };
+};
 
 router.get(
   "/",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
-    const includeDeleted = parseBooleanField(req.query.includeDeleted, false);
-    const filter = includeDeleted ? {} : { deleted: false };
+    if (isAdmin(req.authUser)) {
+      const includeDeleted = parseBooleanField(req.query.includeDeleted, false);
+      const filter = includeDeleted ? {} : { deleted: false };
 
-    const users = await usersCollection()
-      .find(filter)
-      .sort({ created_at: -1 })
-      .toArray();
+      const users = await usersCollection()
+        .find(filter)
+        .sort({ created_at: -1 })
+        .toArray();
+
+      res.json({
+        success: true,
+        value: users.map(toUserResponse),
+      });
+      return;
+    }
+
+    const current = await usersCollection().findOne({ _id: req.authUser._id });
+
+    if (!current) {
+      throw createError(404, "User not found");
+    }
+
+    const userWithStorage = await refreshStorageIfExpired(current);
 
     res.json({
       success: true,
-      value: users.map(toUserResponse),
+      value: [toUserResponse(userWithStorage)],
     });
   })
 );
 
 router.get(
   "/:id",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
     const userId = ensureObjectId(req.params.id);
+
+    ensureSelfAccess(userId, req.authUser);
 
     const user = await usersCollection().findOne({ _id: userId });
 
@@ -182,37 +598,187 @@ router.get(
       throw createError(404, "User not found");
     }
 
+    const userWithStorage = await refreshStorageIfExpired(user);
+
     res.json({
       success: true,
-      value: toUserResponse(user),
+      value: toUserResponse(userWithStorage),
     });
   })
 );
 
 router.post(
   "/",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
-    const doc = createUserDocument(req.body || {});
-
-    const existing = await usersCollection().findOne({ email: doc.email });
-
-    if (existing) {
-      throw createError(409, "A user with this email already exists");
-    }
-
-    const { insertedId } = await usersCollection().insertOne(doc);
+    const createdUser = await insertUser(req.body || {});
 
     res.status(201).json({
       success: true,
-      value: toUserResponse({ ...doc, _id: insertedId }),
+      value: toUserResponse(createdUser),
+    });
+  })
+);
+
+router.post(
+  "/reset-password/request",
+  asyncHandler(async (req, res) => {
+    const email = normalizeEmail(req.body?.email);
+    const user = await usersCollection().findOne({ email, deleted: false });
+
+    if (user) {
+      const token = await persistPasswordResetToken(user._id);
+      await sendPasswordResetEmail({
+        toEmail: user.email,
+        toName: user.email,
+        token,
+      });
+    }
+
+    res.json({
+      success: true,
+      value: {
+        message:
+          "If an account exists for the provided email, password reset instructions have been sent.",
+      },
+    });
+  })
+);
+
+router.post(
+  "/reset-password/confirm",
+  asyncHandler(async (req, res) => {
+    const token = parseResetToken(req.body?.token);
+    const newPassword = parsePassword(req.body?.password);
+
+    const user = await usersCollection().findOne({
+      password_reset_token: token,
+      deleted: false,
+    });
+
+    if (!user) {
+      throw createError(400, "Invalid or expired reset token");
+    }
+
+    const expiration = user.password_reset_token_expires_at
+      ? new Date(user.password_reset_token_expires_at)
+      : null;
+
+    if (!expiration || Number.isNaN(expiration.getTime())) {
+      await clearPasswordResetToken(user._id);
+      throw createError(400, "Invalid or expired reset token");
+    }
+
+    const now = new Date(toChineseIsoString());
+
+    if (expiration <= now) {
+      await clearPasswordResetToken(user._id);
+      throw createError(400, "Reset token has expired");
+    }
+
+    const timestamp = toChineseIsoString();
+
+    await usersCollection().updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          password: newPassword,
+          updated_at: timestamp,
+        },
+        $unset: {
+          password_reset_token: "",
+          password_reset_token_expires_at: "",
+        },
+      }
+    );
+
+    res.json({
+      success: true,
+      value: {
+        message: "Password updated successfully",
+      },
+    });
+  })
+);
+
+router.post(
+  "/register/request-verification",
+  asyncHandler(async (req, res) => {
+    const email = normalizeEmail(req.body?.email);
+    const password = parsePassword(req.body?.password);
+
+    const existingUser = await usersCollection().findOne({ email });
+
+    if (existingUser) {
+      throw createError(409, "A user with this email already exists");
+    }
+
+    const token = await persistEmailVerificationRequest(email, password);
+
+    await sendEmailVerificationEmail({
+      toEmail: email,
+      toName: email,
+      token,
+    });
+
+    res.status(202).json({
+      success: true,
+      value: {
+        message: "Verification email sent",
+      },
+    });
+  })
+);
+
+router.post(
+  "/register",
+  asyncHandler(async (req, res) => {
+    const verificationToken = parseVerificationToken(
+      req.body?.verification_token
+    );
+    const email = normalizeEmail(req.body?.email);
+
+    await consumeEmailVerificationToken(verificationToken, email);
+
+    const payload = { ...(req.body || {}), email };
+    const createdUser = await insertUser(payload);
+    const userWithLastLogin = await recordLastLoginTimestamp(createdUser);
+    const token = await issueAuthTokenForUser(userWithLastLogin);
+
+    res.status(201).json({
+      success: true,
+      value: {
+        user: toUserResponse(userWithLastLogin),
+        token,
+      },
+    });
+  })
+);
+
+router.post(
+  "/login",
+  asyncHandler(async (req, res) => {
+    const authenticatedUser = await authenticateUser(req.body || {});
+    const userWithStorage = await refreshStorageIfExpired(authenticatedUser);
+    const userWithLastLogin = await recordLastLoginTimestamp(userWithStorage);
+    const token = await issueAuthTokenForUser(userWithLastLogin);
+
+    res.json({
+      success: true,
+      value: {
+        user: toUserResponse(userWithLastLogin),
+        token,
+      },
     });
   })
 );
 
 router.put(
   "/:id",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
     const userId = ensureObjectId(req.params.id);
+    ensureSelfAccess(userId, req.authUser);
     const current = await usersCollection().findOne({ _id: userId });
 
     if (!current) {
@@ -237,15 +803,17 @@ router.put(
 
 router.delete(
   "/:id",
+  authenticateRequest,
   asyncHandler(async (req, res) => {
     const userId = ensureObjectId(req.params.id);
+    ensureSelfAccess(userId, req.authUser);
 
     const result = await usersCollection().findOneAndUpdate(
       { _id: userId },
       {
         $set: {
           deleted: true,
-          updated_at: new Date().toISOString(),
+          updated_at: toChineseIsoString(),
         },
       },
       { returnDocument: "after" }
