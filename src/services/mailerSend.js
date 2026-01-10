@@ -14,24 +14,30 @@ const ensureMailerSendConfig = () => {
   }
 };
 
-const buildResetLink = (token) => {
-  if (!config.passwordResetUrl) {
+const buildTokenizedLink = (baseUrl, token) => {
+  if (!baseUrl) {
     return null;
   }
 
-  if (config.passwordResetUrl.includes("%token%")) {
-    return config.passwordResetUrl.replace(/%token%/g, token);
+  if (baseUrl.includes("%token%")) {
+    return baseUrl.replace(/%token%/g, token);
   }
 
   try {
-    const url = new URL(config.passwordResetUrl);
+    const url = new URL(baseUrl);
     url.searchParams.set("token", token);
     return url.toString();
   } catch (_error) {
-    const separator = config.passwordResetUrl.includes("?") ? "&" : "?";
-    return `${config.passwordResetUrl}${separator}token=${token}`;
+    const separator = baseUrl.includes("?") ? "&" : "?";
+    return `${baseUrl}${separator}token=${token}`;
   }
 };
+
+const buildResetLink = (token) =>
+  buildTokenizedLink(config.passwordResetUrl, token);
+
+const buildVerificationLink = (token) =>
+  buildTokenizedLink(config.emailVerificationUrl, token);
 
 const createEmailPayload = ({ toEmail, toName, subject, text, html }) => ({
   from: {
@@ -87,7 +93,7 @@ const sendMailersendEmail = async ({
       data: error.response?.data,
     });
 
-    throw createError(502, "Unable to send password reset email");
+    throw createError(502, "Unable to send transactional email");
   }
 };
 
@@ -112,6 +118,28 @@ const sendPasswordResetEmail = async ({ toEmail, toName, token }) => {
   });
 };
 
+const sendEmailVerificationEmail = async ({ toEmail, toName, token }) => {
+  const verificationLink = buildVerificationLink(token);
+  const subject = "Verify your email address";
+
+  const text = verificationLink
+    ? `Please verify your email address by visiting the link below within the next 24 hours:\n${verificationLink}\n\nIf you need to enter the token manually, use: ${token}`
+    : `Please verify your email address within the next 24 hours using this token: ${token}`;
+
+  const html = verificationLink
+    ? `<p>Please verify your email address.</p><p><a href="${verificationLink}">Verify email</a></p><p>If the button does not work, use this token within the next 24 hours: <strong>${token}</strong></p>`
+    : `<p>Please verify your email address within the next 24 hours using this token: <strong>${token}</strong></p>`;
+
+  await sendMailersendEmail({
+    toEmail,
+    toName,
+    subject,
+    text,
+    html,
+  });
+};
+
 module.exports = {
   sendPasswordResetEmail,
+  sendEmailVerificationEmail,
 };

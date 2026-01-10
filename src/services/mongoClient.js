@@ -4,6 +4,20 @@ const config = require("../config");
 let client;
 let db;
 
+const ensureIndexes = async (database) => {
+  try {
+    await database.collection(config.mongoVerifyEmailCollection).createIndex(
+      { expires_at_ts: 1 },
+      {
+        expireAfterSeconds: 0,
+        name: "verify_email_expires_at_ttl",
+      }
+    );
+  } catch (error) {
+    console.error("Failed to ensure Mongo indexes", error);
+  }
+};
+
 const initMongo = async () => {
   if (db) {
     return db;
@@ -19,6 +33,7 @@ const initMongo = async () => {
 
   await client.connect();
   db = client.db(config.mongoDbName);
+  await ensureIndexes(db);
   console.log(`Mongo connected to ${config.mongoDbName}`);
   return db;
 };

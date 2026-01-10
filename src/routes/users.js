@@ -6,17 +6,24 @@ const { ObjectId } = require("mongodb");
 const { getDb } = require("../services/mongoClient");
 const config = require("../config");
 const { toChineseIsoString } = require("../utils/time");
-const { sendPasswordResetEmail } = require("../services/mailerSend");
+const {
+  sendPasswordResetEmail,
+  sendEmailVerificationEmail,
+} = require("../services/mailerSend");
 
 const router = express.Router();
 const collectionName = config.mongoUsersCollection;
 const PASSWORD_RESET_TOKEN_BYTES = 32;
 const PASSWORD_RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
+const EMAIL_VERIFICATION_TOKEN_BYTES = 32;
+const EMAIL_VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
 const usersCollection = () => getDb().collection(collectionName);
+const verifyEmailCollection = () =>
+  getDb().collection(config.mongoVerifyEmailCollection);
 
 const normalizeEmail = (value) => {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -43,6 +50,14 @@ const parsePassword = (value) => {
 const parseResetToken = (value) => {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw createError(400, "Reset token is required");
+  }
+
+  return value.trim();
+};
+
+const parseVerificationToken = (value) => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw createError(400, "Verification token is required");
   }
 
   return value.trim();
@@ -218,6 +233,71 @@ const clearPasswordResetToken = async (userId) => {
       },
     }
   );
+};
+
+const generateEmailVerificationToken = () =>
+  crypto.randomBytes(EMAIL_VERIFICATION_TOKEN_BYTES).toString("hex");
+
+const persistEmailVerificationRequest = async (email, password) => {
+  const token = generateEmailVerificationToken();
+  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS);
+  const timestamp = toChineseIsoString();
+
+  await verifyEmailCollection().deleteMany({ email });
+
+  await verifyEmailCollection().insertOne({
+    email,
+    password,
+    token,
+    expires_at_ts: toChineseIsoString(expiresAt),
+    created_at: timestamp,
+    updated_at: timestamp,
+    consumed_at: null,
+  });
+
+  return token;
+};
+
+const consumeEmailVerificationToken = async (token, email) => {
+  const record = await verifyEmailCollection().findOne({
+    token,
+    email,
+    consumed_at: null,
+  });
+
+  if (!record) {
+    throw createError(400, "Invalid or expired verification token");
+  }
+
+  const expiration =
+    record.expires_at_ts instanceof Date
+      ? record.expires_at_ts
+      : null;
+  const now = new Date(toChineseIsoString());
+
+  if (!expiration || Number.isNaN(expiration.getTime()) || expiration <= now) {
+    await verifyEmailCollection().deleteOne({ _id: record._id });
+    throw createError(400, "Invalid or expired verification token");
+  }
+
+  const timestamp = toChineseIsoString();
+
+  const result = await verifyEmailCollection().findOneAndUpdate(
+    { _id: record._id, consumed_at: null },
+    {
+      $set: {
+        consumed_at: timestamp,
+        updated_at: timestamp,
+      },
+    },
+    { returnDocument: "after" }
+  );
+
+  if (!result.value) {
+    throw createError(400, "Invalid or expired verification token");
+  }
+
+  return result.value;
 };
 
 const extractBearerToken = (authorizationHeader) => {
@@ -622,9 +702,46 @@ router.post(
 );
 
 router.post(
+  "/register/request-verification",
+  asyncHandler(async (req, res) => {
+    const email = normalizeEmail(req.body?.email);
+    const password = parsePassword(req.body?.password);
+
+    const existingUser = await usersCollection().findOne({ email });
+
+    if (existingUser) {
+      throw createError(409, "A user with this email already exists");
+    }
+
+    const token = await persistEmailVerificationRequest(email, password);
+
+    await sendEmailVerificationEmail({
+      toEmail: email,
+      toName: email,
+      token,
+    });
+
+    res.status(202).json({
+      success: true,
+      value: {
+        message: "Verification email sent",
+      },
+    });
+  })
+);
+
+router.post(
   "/register",
   asyncHandler(async (req, res) => {
-    const createdUser = await insertUser(req.body || {});
+    const verificationToken = parseVerificationToken(
+      req.body?.verification_token
+    );
+    const email = normalizeEmail(req.body?.email);
+
+    await consumeEmailVerificationToken(verificationToken, email);
+
+    const payload = { ...(req.body || {}), email };
+    const createdUser = await insertUser(payload);
     const userWithLastLogin = await recordLastLoginTimestamp(createdUser);
     const token = await issueAuthTokenForUser(userWithLastLogin);
 
