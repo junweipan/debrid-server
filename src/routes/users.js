@@ -803,6 +803,17 @@ router.post(
     );
 
     const { user } = await consumeEmailVerificationToken(verificationToken);
+
+    if (user.email_verified) {
+      res.json({
+        success: true,
+        value: {
+          message: "Email account is already active",
+        },
+      });
+      return;
+    }
+
     const verifyTimestamp = toChineseIsoString();
 
     const result = await usersCollection().findOneAndUpdate(
