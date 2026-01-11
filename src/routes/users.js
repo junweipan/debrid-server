@@ -262,11 +262,8 @@ const persistEmailVerificationRequest = async (userId, email) => {
   return token;
 };
 
-const consumeEmailVerificationToken = async (token, email) => {
-  const record = await verifyEmailCollection().findOne({
-    token,
-    used_at: null,
-  });
+const consumeEmailVerificationToken = async (token) => {
+  const record = await verifyEmailCollection().findOne({token});
 
   if (!record) {
     throw createError(400, "Invalid or expired verification token");
@@ -288,16 +285,16 @@ const consumeEmailVerificationToken = async (token, email) => {
 
   const user = await usersCollection().findOne({
     _id: userId,
-    deleted: false,
+    email: record.email
   });
 
-  if (!user || user.email !== email) {
+  if (!user) {
     await verifyEmailCollection().deleteOne({ _id: record._id });
     throw createError(400, "Invalid verification request");
   }
 
   const result = await verifyEmailCollection().findOneAndUpdate(
-    { _id: record._id, used_at: null },
+    { _id: record._id},
     {
       $set: {
         used_at: now,
@@ -306,11 +303,11 @@ const consumeEmailVerificationToken = async (token, email) => {
     { returnDocument: "after" }
   );
 
-  if (!result.value) {
+  if (!result) {
     throw createError(400, "Invalid or expired verification token");
   }
 
-  return user;
+  return { user, email: record.email };
 };
 
 const extractBearerToken = (authorizationHeader) => {
@@ -802,15 +799,28 @@ router.post(
   "/register",
   asyncHandler(async (req, res) => {
     const verificationToken = parseVerificationToken(
-      req.body?.verification_token
+      req.body?.token ?? req.body?.verification_token
     );
-    const email = normalizeEmail(req.body?.email);
 
-    await consumeEmailVerificationToken(verificationToken, email);
+    const { user } = await consumeEmailVerificationToken(verificationToken);
+    const verifyTimestamp = toChineseIsoString();
 
-    const payload = { ...(req.body || {}), email };
-    const createdUser = await insertUser(payload);
-    const userWithLastLogin = await recordLastLoginTimestamp(createdUser);
+    const result = await usersCollection().findOneAndUpdate(
+      { _id: user._id },
+      {
+        $set: {
+          email_verified: true,
+          email_verified_at: verifyTimestamp
+        },
+      },
+      { returnDocument: "after" }
+    );
+
+    if (!result) {
+      throw createError(404, "User not found");
+    }
+
+    const userWithLastLogin = await recordLastLoginTimestamp(result);
     const token = await issueAuthTokenForUser(userWithLastLogin);
 
     res.status(201).json({
