@@ -7,7 +7,7 @@ let db;
 const ensureIndexes = async (database) => {
   try {
     await database.collection(config.mongoVerifyEmailCollection).createIndex(
-      { expires_at_ts: 1 },
+      { expires_at: 1 },
       {
         expireAfterSeconds: 0,
         name: "verify_email_expires_at_ttl",

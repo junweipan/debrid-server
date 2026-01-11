@@ -10,6 +10,7 @@ const {
   sendPasswordResetEmail,
   sendEmailVerificationEmail,
 } = require("../services/mailerSend");
+const e = require("express");
 
 const router = express.Router();
 const collectionName = config.mongoUsersCollection;
@@ -238,21 +239,24 @@ const clearPasswordResetToken = async (userId) => {
 const generateEmailVerificationToken = () =>
   crypto.randomBytes(EMAIL_VERIFICATION_TOKEN_BYTES).toString("hex");
 
-const persistEmailVerificationRequest = async (email, password) => {
+const persistEmailVerificationRequest = async (userId, email) => {
+  const normalizedUserId =
+    userId instanceof ObjectId ? userId : ensureObjectId(userId);
   const token = generateEmailVerificationToken();
-  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS);
-  const timestamp = toChineseIsoString();
+  const expiresAt = new Date(
+    toChineseIsoString(new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS))
+  );
+  const now = new Date(toChineseIsoString());
 
-  await verifyEmailCollection().deleteMany({ email });
+  await verifyEmailCollection().deleteMany({ user_id: normalizedUserId });
 
   await verifyEmailCollection().insertOne({
+    user_id: normalizedUserId,
     email,
-    password,
     token,
-    expires_at_ts: toChineseIsoString(expiresAt),
-    created_at: timestamp,
-    updated_at: timestamp,
-    consumed_at: null,
+    expires_at: expiresAt,
+    created_at: now,
+    used_at: null,
   });
 
   return token;
@@ -261,8 +265,7 @@ const persistEmailVerificationRequest = async (email, password) => {
 const consumeEmailVerificationToken = async (token, email) => {
   const record = await verifyEmailCollection().findOne({
     token,
-    email,
-    consumed_at: null,
+    used_at: null,
   });
 
   if (!record) {
@@ -270,9 +273,7 @@ const consumeEmailVerificationToken = async (token, email) => {
   }
 
   const expiration =
-    record.expires_at_ts instanceof Date
-      ? record.expires_at_ts
-      : null;
+    record.expires_at instanceof Date ? record.expires_at : null;
   const now = new Date(toChineseIsoString());
 
   if (!expiration || Number.isNaN(expiration.getTime()) || expiration <= now) {
@@ -280,14 +281,26 @@ const consumeEmailVerificationToken = async (token, email) => {
     throw createError(400, "Invalid or expired verification token");
   }
 
-  const timestamp = toChineseIsoString();
+  const userId =
+    record.user_id instanceof ObjectId
+      ? record.user_id
+      : ensureObjectId(record.user_id);
+
+  const user = await usersCollection().findOne({
+    _id: userId,
+    deleted: false,
+  });
+
+  if (!user || user.email !== email) {
+    await verifyEmailCollection().deleteOne({ _id: record._id });
+    throw createError(400, "Invalid verification request");
+  }
 
   const result = await verifyEmailCollection().findOneAndUpdate(
-    { _id: record._id, consumed_at: null },
+    { _id: record._id, used_at: null },
     {
       $set: {
-        consumed_at: timestamp,
-        updated_at: timestamp,
+        used_at: now,
       },
     },
     { returnDocument: "after" }
@@ -297,7 +310,7 @@ const consumeEmailVerificationToken = async (token, email) => {
     throw createError(400, "Invalid or expired verification token");
   }
 
-  return result.value;
+  return user;
 };
 
 const extractBearerToken = (authorizationHeader) => {
@@ -366,14 +379,41 @@ const ensureSelfAccess = (requestedUserId, currentUser) => {
 const createUserDocument = (payload) => {
   const email = normalizeEmail(payload.email);
   const password = parsePassword(payload.password);
-  const storageAll = parseNumberField(payload.storage_all, "storage_all");
-  const storageUsed = parseNumberField(payload.storage_used, "storage_used");
+  const storageAll = parseNumberField(
+    Object.prototype.hasOwnProperty.call(payload, "storage_all")
+      ? payload.storage_all
+      : 0,
+    "storage_all"
+  );
+  const storageUsed = parseNumberField(
+    Object.prototype.hasOwnProperty.call(payload, "storage_used")
+      ? payload.storage_used
+      : 0,
+    "storage_used"
+  );
   const role =
-    typeof payload.role === "string" ? payload.role.trim() : "standard";
+    typeof payload.role === "string" && payload.role.trim().length > 0
+      ? payload.role.trim()
+      : "standard";
 
   enforceStorageInvariant(storageAll, storageUsed);
 
   const timestamp = toChineseIsoString();
+  const emailVerified = parseBooleanField(payload.email_verified, false);
+  let emailVerifiedAt = null;
+
+  if (emailVerified) {
+    if (Object.prototype.hasOwnProperty.call(payload, "email_verified_at")) {
+      emailVerifiedAt = parseNullableDateField(
+        payload.email_verified_at,
+        "email_verified_at"
+      );
+    }
+
+    if (!emailVerifiedAt) {
+      emailVerifiedAt = timestamp;
+    }
+  }
 
   return {
     email,
@@ -384,13 +424,15 @@ const createUserDocument = (payload) => {
       new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
     ), // Default to 7 days from now
     deleted: parseBooleanField(payload.deleted, false),
-    role: role === "" ? "standard" : role,
+    role,
     created_at: timestamp,
     updated_at: timestamp,
     token: null,
     last_login_at: null,
     password_reset_token: null,
     password_reset_token_expires_at: null,
+    email_verified: emailVerified,
+    email_verified_at: emailVerified ? emailVerifiedAt : null,
   };
 };
 
@@ -479,6 +521,8 @@ const authenticateUser = async (payload = {}) => {
 const toUserResponse = (doc) => ({
   id: doc._id.toString(),
   email: doc.email,
+  email_verified: Boolean(doc.email_verified),
+  email_verified_at: doc.email_verified_at,
   storage_all: doc.storage_all,
   storage_used: doc.storage_used,
   storage_expired_at: doc.storage_expired_at,
@@ -704,16 +748,40 @@ router.post(
 router.post(
   "/register/request-verification",
   asyncHandler(async (req, res) => {
-    const email = normalizeEmail(req.body?.email);
-    const password = parsePassword(req.body?.password);
+    const body = req.body || {};
+    const email = normalizeEmail(body.email);
+    const password = parsePassword(body.password);
+    const payload = {
+      ...body,
+      email,
+      password,
+      email_verified: false,
+      email_verified_at: null,
+    };
 
-    const existingUser = await usersCollection().findOne({ email });
+    let targetUser = await usersCollection().findOne({ email });
 
-    if (existingUser) {
-      throw createError(409, "A user with this email already exists");
+    if (targetUser) {
+      if (targetUser.email_verified) {
+        throw createError(409, "A user with this email already exists");
+      }
+
+      const updates = buildUpdateDocument(payload, targetUser);
+      updates.email_verified = false;
+      updates.email_verified_at = null;
+
+      const result = await usersCollection().findOneAndUpdate(
+        { _id: targetUser._id },
+        { $set: updates },
+        { returnDocument: "after" }
+      );
+
+      targetUser = result.value;
+    } else {
+      targetUser = await insertUser(payload);
     }
 
-    const token = await persistEmailVerificationRequest(email, password);
+    const token = await persistEmailVerificationRequest(targetUser._id, email);
 
     await sendEmailVerificationEmail({
       toEmail: email,
